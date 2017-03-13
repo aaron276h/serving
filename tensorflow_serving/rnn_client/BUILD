@@ -84,6 +84,18 @@ py_binary(
     ],
 )
 
+py_binary(
+    name = "tf_serving_live",
+    srcs = [
+        "tf_serving_live.py",
+    ],
+    deps = [
+        "@tf_serving//tensorflow_serving/apis:predict_proto_py_pb2",
+        "@tf_serving//tensorflow_serving/apis:prediction_service_proto_py_pb2",
+        "@org_tensorflow//tensorflow:tensorflow_py",
+    ],
+)
+
 # TODO(b/32628014): remove inception_export after we no longer support
 # SessionBundle.
 py_binary(

@@ -22,8 +22,9 @@ import path_formatter
 import zmq
 import numpy as np
 
-from data_fetcher import DataFetcher
-from serialize import deserialize
+# Build script will need to specify symbolic link
+import generated_sources.to_tensorflow_serving_pb2 as to_tensorflow_serving_pb2
+import generated_sources.from_tensorflow_serving_pb2 as from_tensorflow_serving_pb2
 
 tf.app.flags.DEFINE_integer('concurrency', 10, 'Maximum number of concurrent inference requests')
 tf.app.flags.DEFINE_string('server', '', 'PredictionService host')
@@ -128,9 +129,29 @@ def do_inference(host, port, concurrency, feature_vector):
     result_future = stub.Predict.future(request, 5.0)  # 5 seconds
     result = result_future.result().outputs['prediction']
     response = numpy.array(result.float_val).reshape((result.tensor_shape.dim[0].size, result.tensor_shape.dim[1].size))
-    print (response)
 
     return response
+
+
+def build_feature_vector(features):
+    """ Build np feature vector from Proto message
+
+    :param features: to_tensorflow_serving_pb2.features
+    :return:
+    """
+    feature_vector = np.array([features.hour,
+                               features.market_price,
+                               features.day_of_week,
+                               features.is_weekend,
+                               features.is_holiday,
+                               features.us_east_tod,
+                               features.us_central_tod,
+                               features.us_west_tod,
+                               features.price_diff_2,
+                               features.price_diff_10,
+                               features.price_diff_30,
+                               features.delta])
+    return feature_vector
 
 
 def main(_):
@@ -147,55 +168,48 @@ def main(_):
     with open(conf_file_path) as conf_file:
         conf = json.loads(conf_file.read(), object_hook=configuration.configuration_decoder)
 
-    # Ports for ZMQ si 8000 and 9000+ for inference
+    # Ports are specified in config file
+    # Ports for Client to receive inference queries is 8000
+    # Forwards queries to servers which have ports 9000+
     # The + is zone.index * number of instance types + instance_type.index
     # if unified_instances is true, than port is just zone.index
 
     # Start ZMQ server
     context = zmq.Context()
     socket = context.socket(zmq.REP)
-    socket.bind("tcp://*:8000")
-
-    # Load classification scalers
-    classification_scalers = []
-    for zone in conf.zones:
-        if conf.unify_instances is not True:
-            for instance_type in conf.instance_types:
-                classification_scalers.append(pickle.load(open(path_formatter.format_scaler_path_string(
-                    conf.scaler_folder, zone, instance_type), 'r')))
-        else:
-            assert 0
+    socket.bind("tcp://*:%s" % conf.client_port)
 
     while True:
-        print ('Waiting for messages ...')
-
         # Get message from BidBrain / simulator
         message = socket.recv()
 
-        print('Got message ...')
+        # Parse query message
+        parsed_message = to_tensorflow_serving_pb2.InferenceQuery()
+        parsed_message.ParseFromString(message)
 
-        # De-serialize the message
-        zone_index, instance_index, feature_vector = deserialize(msg=message, unify_instances=conf.unify_instances)
+        # Build response message
+        response_message = from_tensorflow_serving_pb2.InferenceResults()
 
-        assert conf.unify_instances is not True
+        # TODO: combine quries for servers
 
-        # Find the index of the scaler
-        model_index = zone_index * len(conf.instance_types) + instance_index
-        assert model_index < len(classification_scalers)
-        
-        # Scale the features
-        feature_vector = classification_scalers[model_index].transform(feature_vector)
+        for query in parsed_message.model_input:
+            zone_index = conf.zones.index(query.zone)
+            instance_index = conf.instance_types.index(query.instance_type)
+            feature_vector = build_feature_vector(query.features)
 
-        # Compute port of the model you need to connect to
-        port = 9000 + model_index
-        if conf.unify_instances is True:
-            port = 9000 + zone_index
+            server_port = conf.base_port + len(conf.instance_types) * zone_index + instance_index
+            probability_of_eviction = do_inference(host=FLAGS.server,
+                                                   port=server_port,
+                                                   concurrency=FLAGS.concurrency,
+                                                   feature_vector=feature_vector)[0][0]
 
-        prediction = do_inference(host=FLAGS.server, port=port, concurrency=FLAGS.concurrency,
-                                  feature_vector=feature_vector)
+            query_result = response_message.predictions.add()
+            query_result.probability_of_eviction = probability_of_eviction
+            query_result.id = query.id
 
-        # Send the probability of eviction
-        socket.send(str(prediction[0][0]))
+        # Send response
+        response_serialized = response_message.SerializeToString()
+        socket.send(response_serialized)
 
 if __name__ == '__main__':
     tf.app.run()

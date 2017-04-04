@@ -12,3 +12,8 @@ node_modules
 /third_party/py/numpy/numpy_include
 /util/python/python_include
 /util/python/python_lib
+upload_file.sh
+client-mlp-bin/
+client-lstm-bin/
+server-bin/
+*~

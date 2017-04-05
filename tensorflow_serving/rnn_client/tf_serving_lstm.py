@@ -116,7 +116,7 @@ def do_inference(host, port, concurrency, feature_vectors):
     :return: Prediction
     """
     # Assuming one look up at a time for now
-    feature_vector = feature_vectors.reshape(1, 10, 12)
+    # feature_vector = feature_vectors.reshape(1, 10, 12)
 
     channel = implementations.insecure_channel(host, int(port))
     stub = prediction_service_pb2.beta_create_PredictionService_stub(channel)
@@ -124,7 +124,7 @@ def do_inference(host, port, concurrency, feature_vectors):
     request = predict_pb2.PredictRequest()
     request.model_spec.name = 'ec2pred_mlp'
     request.inputs['input'].CopyFrom(
-        tf.contrib.util.make_tensor_proto(feature_vector, shape=feature_vector.shape, dtype=tf.float32))
+        tf.contrib.util.make_tensor_proto(feature_vectors, shape=feature_vectors.shape, dtype=tf.float32))
 
     result_future = stub.Predict.future(request, 5.0)  # 5 seconds
     result = result_future.result().outputs['prediction']
@@ -153,6 +153,18 @@ def build_feature_vector(features):
                                features.delta])
     return feature_vector
 
+
+def get_sub_dictionary(dictionary, key, final_layer):
+    if key not in dictionary:
+        if final_layer is True:
+            dictionary[key] = {
+                'offsets': [],
+                'ids': []
+            }
+        else:
+            dictionary[key] = {}
+
+    return dictionary[key]
 
 def main(_):
     if not FLAGS.server:
@@ -190,24 +202,49 @@ def main(_):
         # Build response message
         response_message = from_tensorflow_serving_pb2.InferenceResults()
 
-        # TODO: combine queries for servers
-        for query in parsed_message.model_input:
+        # Map of zone and instance types {zone: {index: {'offsets': [int], 'ids': [int]}}
+        query_dictionary = {}
+
+        # Read all the inputs
+        queries = np.zeros((len(parsed_message.model_input), 10, 12))
+        for query_index, query in enumerate(parsed_message.model_input):
             zone_index = conf.zones.index(query.zone)
+            zone_dictionary = get_sub_dictionary(
+                dictionary=query_dictionary,
+                key=zone_index,
+                final_layer=False
+            )
+
             instance_index = conf.instance_types.index(query.instance_type)
+            instance_dictionary = get_sub_dictionary(
+                dictionary=zone_dictionary,
+                key=instance_index,
+                final_layer=True
+            )
 
-            feature_vectors = np.zeros((1,10,12))
-            for index, time_step in enumerate(query.feature_inputs.features):
-                feature_vectors[0][index] = build_feature_vector(time_step)
+            instance_dictionary['offsets'].append(query_index)
+            instance_dictionary['ids'].append(query.id)
 
-            server_port = conf.base_port + len(conf.instance_types) * zone_index + instance_index
-            probability_of_eviction = do_inference(host=FLAGS.server,
-                                                   port=server_port,
-                                                   concurrency=FLAGS.concurrency,
-                                                   feature_vectors=feature_vectors)[0][0]
+            for time_step_index, time_step in enumerate(query.feature_inputs.features):
+                queries[query_index][time_step_index] = build_feature_vector(time_step)
 
-            query_result = response_message.predictions.add()
-            query_result.probability_of_eviction = probability_of_eviction
-            query_result.id = query.id
+        # Make the lookups
+        for zone_index in query_dictionary.keys():
+            for instance_index in query_dictionary[zone_index].keys():
+                server_port = conf.base_port + len(conf.instance_types) * zone_index + instance_index
+                feature_vectors = queries[np.array(query_dictionary[zone_index][instance_index]['offsets'])]
+
+                predictions = do_inference(
+                    host=FLAGS.server,
+                    port=server_port,
+                    concurrency=FLAGS.concurrency,
+                    feature_vectors=feature_vectors
+                )
+
+                for prediction_index, id in enumerate(query_dictionary[zone_index][instance_index]['ids']):
+                    query_result = response_message.predictions.add()
+                    query_result.probability_of_eviction = predictions[prediction_index][0]
+                    query_result.id = id
 
         # Send response
         response_serialized = response_message.SerializeToString()

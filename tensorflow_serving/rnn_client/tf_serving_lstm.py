@@ -147,9 +147,9 @@ def build_feature_vector(features):
                                features.us_east_tod,
                                features.us_central_tod,
                                features.us_west_tod,
-                               features.price_diff_2,
-                               features.price_diff_10,
-                               features.price_diff_30,
+                               # features.price_diff_2,
+                               # features.price_diff_10,
+                               # features.price_diff_30,
                                features.delta])
     return feature_vector
 
@@ -165,6 +165,7 @@ def get_sub_dictionary(dictionary, key, final_layer):
             dictionary[key] = {}
 
     return dictionary[key]
+
 
 def main(_):
     if not FLAGS.server:

@@ -207,7 +207,7 @@ def main(_):
         query_dictionary = {}
 
         # Read all the inputs
-        queries = np.zeros((len(parsed_message.model_input), 10, 12))
+        queries = np.zeros((len(parsed_message.model_input), 10, 9))
         for query_index, query in enumerate(parsed_message.model_input):
             zone_index = conf.zones.index(query.zone)
             zone_dictionary = get_sub_dictionary(
